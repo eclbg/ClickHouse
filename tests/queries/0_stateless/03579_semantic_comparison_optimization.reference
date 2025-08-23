@@ -1,0 +1,13 @@
+Non-nullable id != id should return no rows:
+Non-nullable id = id should return all rows:
+1	1	test1
+2	\N	test2
+3	3	test3
+Nullable id != id should not return any rows:
+Nullable id = id should return rows where nullable_id is NOT NULL:
+1	1	test1
+3	3	test3
+Complex expression with self-comparison:
+Different columns comparison (should not be optimized):
+1	1	test1
+3	3	test3
