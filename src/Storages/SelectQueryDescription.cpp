@@ -5,6 +5,8 @@
 #include <Interpreters/getTableExpressions.h>
 #include <Interpreters/AddDefaultDatabaseVisitor.h>
 #include <Interpreters/Context.h>
+#include <Interpreters/DatabaseCatalog.h>
+#include <Storages/StorageAlias.h>
 
 namespace DB
 {
@@ -115,6 +117,19 @@ SelectQueryDescription SelectQueryDescription::getSelectQueryFromASTForMatView(c
     ASTSelectQuery & new_inner_query = query.list_of_selects->children.at(0)->as<ASTSelectQuery &>();
     /// Extracting first found table ID
     result.select_table_id = extractDependentTableFromSelectQuery(new_inner_query, context);
+
+    /// If the source table is an Alias, resolve it to the target table.
+    /// This ensures MVs trigger on inserts to both the alias and target tables.
+    if (result.select_table_id)
+    {
+        auto storage = DatabaseCatalog::instance().tryGetTable(result.select_table_id, context);
+        if (const auto * alias_storage = dynamic_cast<const StorageAlias *>(storage.get()))
+        {
+            auto target_storage = alias_storage->getTargetTable();
+            result.select_table_id = target_storage->getStorageID();
+        }
+    }
+
     result.inner_query = new_inner_query.clone();
 
     return result;
