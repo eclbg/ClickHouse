@@ -1,0 +1,12 @@
+After INSERT INTO alias_table (1, via_alias):
+mv_target contents:
+1	via_alias
+After INSERT INTO source_table (2, direct):
+mv_target contents:
+1	via_alias
+2	direct
+After INSERT INTO alias_table (3, via_alias_again):
+mv_target contents:
+1	via_alias
+2	direct
+3	via_alias_again

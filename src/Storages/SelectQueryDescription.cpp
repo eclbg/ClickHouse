@@ -2,9 +2,13 @@
 
 #include <Parsers/ASTSelectWithUnionQuery.h>
 #include <Parsers/ASTSelectQuery.h>
+#include <Parsers/ASTTablesInSelectQuery.h>
+#include <Parsers/ASTIdentifier.h>
 #include <Interpreters/getTableExpressions.h>
 #include <Interpreters/AddDefaultDatabaseVisitor.h>
 #include <Interpreters/Context.h>
+#include <Interpreters/DatabaseCatalog.h>
+#include <Storages/StorageAlias.h>
 
 namespace DB
 {
@@ -71,7 +75,6 @@ StorageID extractDependentTableFromSelectQuery(ASTSelectQuery & query, ContextPt
     return StorageID::createEmpty();
 }
 
-
 void checkAllowedQueries(const ASTSelectWithUnionQuery & select)
 {
     for (const auto & children : select.list_of_selects->children)
@@ -115,6 +118,26 @@ SelectQueryDescription SelectQueryDescription::getSelectQueryFromASTForMatView(c
     ASTSelectQuery & new_inner_query = query.list_of_selects->children.at(0)->as<ASTSelectQuery &>();
     /// Extracting first found table ID
     result.select_table_id = extractDependentTableFromSelectQuery(new_inner_query, context);
+
+    /// If the source table is an Alias, replace it with the target table in the AST.
+    /// This ensures both select_table_id and inner_query reference the target,
+    /// so view source substitution works correctly during MV execution.
+    if (result.select_table_id)
+    {
+        auto storage = DatabaseCatalog::instance().tryGetTable(result.select_table_id, context);
+        if (const auto * alias_storage = dynamic_cast<const StorageAlias *>(storage.get()))
+        {
+            auto target_id = alias_storage->getTargetTable()->getStorageID();
+            result.select_table_id = target_id;
+
+            /// Replace the table identifier in the AST. We know the structure exists
+            /// because extractDependentTableFromSelectQuery succeeded above.
+            auto & tables_element = new_inner_query.tables()->children[0]->as<ASTTablesInSelectQueryElement &>();
+            auto & table_expr = tables_element.table_expression->as<ASTTableExpression &>();
+            table_expr.database_and_table_name->as<ASTTableIdentifier &>().resetTable(target_id.database_name, target_id.table_name);
+        }
+    }
+
     result.inner_query = new_inner_query.clone();
 
     return result;
