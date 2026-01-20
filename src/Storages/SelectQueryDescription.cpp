@@ -5,6 +5,8 @@
 #include <Interpreters/getTableExpressions.h>
 #include <Interpreters/AddDefaultDatabaseVisitor.h>
 #include <Interpreters/Context.h>
+#include <Interpreters/DatabaseCatalog.h>
+#include <Storages/StorageAlias.h>
 
 namespace DB
 {
@@ -115,6 +117,23 @@ SelectQueryDescription SelectQueryDescription::getSelectQueryFromASTForMatView(c
     ASTSelectQuery & new_inner_query = query.list_of_selects->children.at(0)->as<ASTSelectQuery &>();
     /// Extracting first found table ID
     result.select_table_id = extractDependentTableFromSelectQuery(new_inner_query, context);
+
+    /// Forbid creating MVs with Alias tables as the source.
+    /// Users should reference the target table directly instead.
+    if (result.select_table_id)
+    {
+        auto storage = DatabaseCatalog::instance().tryGetTable(result.select_table_id, context);
+        if (const auto * alias_storage = dynamic_cast<const StorageAlias *>(storage.get()))
+        {
+            throw Exception(
+                ErrorCodes::QUERY_IS_NOT_SUPPORTED_IN_MATERIALIZED_VIEW,
+                "Cannot create MATERIALIZED VIEW with Alias table '{}' as source. "
+                "Use the target table '{}' directly instead.",
+                result.select_table_id.getFullTableName(),
+                alias_storage->getTargetTable()->getStorageID().getFullTableName());
+        }
+    }
+
     result.inner_query = new_inner_query.clone();
 
     return result;
