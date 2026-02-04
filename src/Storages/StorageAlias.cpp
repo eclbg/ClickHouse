@@ -167,21 +167,25 @@ SinkToStoragePtr StorageAlias::write(
 void StorageAlias::alter(
     const AlterCommands & params,
     ContextPtr local_context,
-    AlterLockHolder & table_lock_holder)
+    AlterLockHolder & /*table_lock_holder*/)
 {
     auto target_storage = getTargetTable(TargetAccess{local_context, AccessType::ALTER});
-    target_storage->alter(params, local_context, table_lock_holder);
+    auto target_lock = target_storage->lockForAlter(local_context->getSettingsRef()[Setting::lock_acquire_timeout]);
+    target_storage->alter(params, local_context, target_lock);
 }
 
 void StorageAlias::truncate(
     const ASTPtr & query,
     const StorageMetadataPtr & /*metadata_snapshot*/,
     ContextPtr local_context,
-    TableExclusiveLockHolder & table_lock_holder)
+    TableExclusiveLockHolder & /*table_lock_holder*/)
 {
     auto target_storage = getTargetTable(TargetAccess{local_context, AccessType::TRUNCATE});
     auto target_metadata = target_storage->getInMemoryMetadataPtr();
-    target_storage->truncate(query, target_metadata, local_context, table_lock_holder);
+    auto target_lock = target_storage->lockExclusively(
+        local_context->getCurrentQueryId(),
+        local_context->getSettingsRef()[Setting::lock_acquire_timeout]);
+    target_storage->truncate(query, target_metadata, local_context, target_lock);
 }
 
 bool StorageAlias::optimize(
@@ -195,6 +199,9 @@ bool StorageAlias::optimize(
     ContextPtr local_context)
 {
     auto target_storage = getTargetTable(TargetAccess{local_context, AccessType::OPTIMIZE});
+    auto target_lock = target_storage->lockForShare(
+        local_context->getCurrentQueryId(),
+        local_context->getSettingsRef()[Setting::lock_acquire_timeout]);
     auto target_metadata = target_storage->getInMemoryMetadataPtr();
     return target_storage->optimize(query, target_metadata, partition, final, deduplicate,
                                     deduplicate_by_columns, cleanup, local_context);
@@ -206,6 +213,9 @@ Pipe StorageAlias::alterPartition(
     ContextPtr local_context)
 {
     auto target_storage = getTargetTable(TargetAccess{local_context, AccessType::ALTER});
+    auto target_lock = target_storage->lockForShare(
+        local_context->getCurrentQueryId(),
+        local_context->getSettingsRef()[Setting::lock_acquire_timeout]);
     auto target_metadata = target_storage->getInMemoryMetadataPtr();
     return target_storage->alterPartition(target_metadata, commands, local_context);
 }
@@ -224,12 +234,18 @@ void StorageAlias::checkAlterPartitionIsPossible(
 void StorageAlias::mutate(const MutationCommands & commands, ContextPtr local_context)
 {
     auto target_storage = getTargetTable(TargetAccess{local_context, AccessType::ALTER});
+    auto target_lock = target_storage->lockForShare(
+        local_context->getCurrentQueryId(),
+        local_context->getSettingsRef()[Setting::lock_acquire_timeout]);
     target_storage->mutate(commands, local_context);
 }
 
 QueryPipeline StorageAlias::updateLightweight(const MutationCommands & commands, ContextPtr local_context)
 {
     auto target_storage = getTargetTable(TargetAccess{local_context, AccessType::ALTER});
+    auto target_lock = target_storage->lockForShare(
+        local_context->getCurrentQueryId(),
+        local_context->getSettingsRef()[Setting::lock_acquire_timeout]);
     return target_storage->updateLightweight(commands, local_context);
 }
 
