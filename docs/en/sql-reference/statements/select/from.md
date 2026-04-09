@@ -46,6 +46,8 @@ It is applicable when selecting data from tables using the following table engin
 - `CollapsingMergeTree`
 - `VersionedCollapsingMergeTree`
 
+When reading through the `Merge` table engine or the `merge()` table function, `FINAL` is normally applied independently inside each matched source table. To enable an opt-in global cross-table `ReplacingMergeTree` merge for compatible sources, pass a preferred source table suffix as the optional third `Merge` engine argument or the optional third `merge()` table-function argument when the database name is specified explicitly.
+
 `SELECT` queries with `FINAL` are executed in parallel. The [max_final_threads](/operations/settings/settings#max_final_threads) setting limits the number of threads used.
 
 ### Drawbacks {#drawbacks}

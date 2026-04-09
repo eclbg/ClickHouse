@@ -17,7 +17,7 @@ Reading is automatically parallelized. Writing to a table is not supported. When
 ## Creating a table {#creating-a-table}
 
 ```sql
-CREATE TABLE ... Engine=Merge(db_name, tables_regexp)
+CREATE TABLE ... Engine=Merge(db_name, tables_regexp[, preferred_source_table_suffix])
 ```
 
 ## Engine parameters {#engine-parameters}
@@ -33,6 +33,10 @@ CREATE TABLE ... Engine=Merge(db_name, tables_regexp)
 
 `tables_regexp` — A regular expression to match the table names in the specified DB or DBs.
 
+### `preferred_source_table_suffix` {#preferred_source_table_suffix}
+
+Optional suffix used only by the opt-in cross-table `FINAL` path for compatible `ReplacingMergeTree` source tables. If several rows have the same sorting key and the same real version, rows coming from tables whose names end with this suffix win the cross-table tie-break.
+
 Regular expressions — [re2](https://github.com/google/re2) (supports a subset of PCRE), case-sensitive.
 See the notes about escaping symbols in regular expressions in the "match" section.
 
@@ -42,6 +46,8 @@ When selecting tables to read, the `Merge` table itself is not selected, even if
 It is possible to create two `Merge` tables that will endlessly try to read each others' data, but this is not a good idea.
 
 The typical way to use the `Merge` engine is for working with a large number of `TinyLog` tables as if with a single table.
+
+For compatible `ReplacingMergeTree` source tables, you can opt into a global cross-table `FINAL` merge by passing `preferred_source_table_suffix` to the engine. When rows have the same sorting key and the same real version, rows coming from tables whose names end with the configured suffix win the cross-table tie-break.
 
 ## Examples {#examples}
 
