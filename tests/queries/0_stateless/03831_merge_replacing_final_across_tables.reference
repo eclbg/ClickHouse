@@ -1,0 +1,16 @@
+merge engine without version
+1	rt_new	plain_03831_v1_rt
+2	base_only	plain_03831_v1
+3	rt_only	plain_03831_v1_rt
+table function without version
+1	rt_new	plain_03831_v1_rt
+2	base_only	plain_03831_v1
+3	rt_only	plain_03831_v1_rt
+merge engine with version
+1	2	rt_v2_tie	versioned_03831_v1_rt
+2	3	base_v3	versioned_03831_v1
+3	1	rt_v1_only	versioned_03831_v1_rt
+table function with version
+1	2	rt_v2_tie	versioned_03831_v1_rt
+2	3	base_v3	versioned_03831_v1
+3	1	rt_v1_only	versioned_03831_v1_rt
