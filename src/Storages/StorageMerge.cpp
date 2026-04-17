@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <functional>
 #include <iterator>
 #include <Access/ContextAccess.h>
@@ -18,8 +19,10 @@
 #include <Core/Settings.h>
 #include <DataTypes/DataTypeLowCardinality.h>
 #include <DataTypes/DataTypeString.h>
+#include <DataTypes/DataTypeTuple.h>
 #include <DataTypes/getLeastSupertype.h>
 #include <DataTypes/IDataType.h>
+#include <DataTypes/DataTypesNumber.h>
 #include <Interpreters/Context.h>
 #include <Interpreters/ExpressionActions.h>
 #include <Interpreters/IdentifierSemantic.h>
@@ -44,7 +47,9 @@
 #include <Processors/QueryPlan/ExpressionStep.h>
 #include <Processors/QueryPlan/QueryPlan.h>
 #include <Processors/QueryPlan/ReadFromMergeTree.h>
+#include <Processors/Merges/ReplacingSortedTransform.h>
 #include <Processors/Sources/NullSource.h>
+#include <Processors/Transforms/ExpressionTransform.h>
 #include <Processors/Transforms/FilterTransform.h>
 #include <Processors/Transforms/MaterializingTransform.h>
 #include <QueryPipeline/QueryPipelineBuilder.h>
@@ -57,6 +62,7 @@
 #include <Storages/StorageDistributed.h>
 #include <Storages/StorageFactory.h>
 #include <Storages/StorageMerge.h>
+#include <Storages/MergeTree/MergeTreeData.h>
 #include <Storages/StorageView.h>
 #include <Storages/VirtualColumnUtils.h>
 #include <Storages/checkAndGetLiteralArgument.h>
@@ -111,6 +117,33 @@ bool columnDefaultKindHasSameType(ColumnDefaultKind lhs, ColumnDefaultKind rhs)
     return false;
 }
 
+/// Adds to the select query section `WITH value AS column_name`
+///
+/// For example:
+/// - `WITH 9000 as _port`.
+void rewriteEntityInAst(ASTPtr ast, const String & column_name, const Field & value)
+{
+    auto & select = ast->as<ASTSelectQuery &>();
+    if (!select.with())
+        select.setExpression(ASTSelectQuery::Expression::WITH, make_intrusive<ASTExpressionList>());
+
+    auto literal = make_intrusive<ASTLiteral>(value);
+    literal->alias = column_name;
+    literal->setPreferAliasToColumnName(true);
+    select.with()->children.push_back(literal);
+}
+
+void appendUniqueName(Names & names, const String & name)
+{
+    if (std::ranges::find(names, name) == names.end())
+        names.push_back(name);
+}
+
+void addHeaderColumnIfMissing(Block & header, const String & column_name, const DataTypePtr & type)
+{
+    if (!header.has(column_name))
+        header.insert(ColumnWithTypeAndName(type, column_name));
+}
 }
 
 StorageMerge::DatabaseNameOrRegexp::DatabaseNameOrRegexp(
@@ -134,6 +167,7 @@ StorageMerge::StorageMerge(
     const String & source_database_name_or_regexp_,
     bool database_is_regexp_,
     const DBToTableSetMap & source_databases_and_tables_,
+    const String & preferred_source_table_suffix_,
     ContextPtr context_)
     : IStorage(table_id_)
     , WithContext(context_->getGlobalContext())
@@ -142,6 +176,7 @@ StorageMerge::StorageMerge(
         database_is_regexp_,
         source_database_name_or_regexp_, {},
         source_databases_and_tables_)
+    , preferred_source_table_suffix(preferred_source_table_suffix_)
 {
     StorageInMemoryMetadata storage_metadata;
     storage_metadata.setColumns(columns_.empty()
@@ -159,6 +194,7 @@ StorageMerge::StorageMerge(
     const String & source_database_name_or_regexp_,
     bool database_is_regexp_,
     const String & source_table_regexp_,
+    const String & preferred_source_table_suffix_,
     ContextPtr context_)
     : IStorage(table_id_)
     , WithContext(context_->getGlobalContext())
@@ -167,6 +203,7 @@ StorageMerge::StorageMerge(
         database_is_regexp_,
         source_database_name_or_regexp_,
         source_table_regexp_, {})
+    , preferred_source_table_suffix(preferred_source_table_suffix_)
 {
     StorageInMemoryMetadata storage_metadata;
     storage_metadata.setColumns(columns_.empty()
@@ -361,6 +398,9 @@ QueryProcessingStage::Enum StorageMerge::getQueryProcessingStage(
     const StorageSnapshotPtr &,
     SelectQueryInfo & query_info) const
 {
+    if (query_info.isFinal() && !preferred_source_table_suffix.empty())
+        return QueryProcessingStage::FetchColumns;
+
     /// In case of JOIN or ARRAY JOIN the first stage (which includes JOIN/ARRAY JOIN)
     /// should be done on the initiator always.
     ///
@@ -543,6 +583,180 @@ void ReadFromMerge::addFilter(FilterDAGInfo filter)
     pushed_down_filters.push_back(std::move(filter));
 }
 
+ReadFromMerge::AliasData ReadFromMerge::buildGlobalReplacingVersionAlias(
+    const GlobalReplacingFinalInfo & global_replacing_final_info,
+    const StorageMetadataPtr & metadata,
+    const String & table_name)
+{
+    const auto source_priority = static_cast<UInt8>(table_name.ends_with(global_replacing_final_info.preferred_table_suffix));
+    auto source_priority_type = std::make_shared<DataTypeUInt8>();
+
+    ASTPtr expression;
+    DataTypePtr type;
+    if (global_replacing_final_info.real_version_column_name.empty())
+    {
+        expression = make_intrusive<ASTLiteral>(Field(source_priority));
+        type = source_priority_type;
+    }
+    else
+    {
+        const auto & real_version_type = metadata->getColumns().get(global_replacing_final_info.real_version_column_name).type;
+        expression = makeASTFunction(
+            "tuple",
+            make_intrusive<ASTIdentifier>(global_replacing_final_info.real_version_column_name),
+            make_intrusive<ASTLiteral>(Field(source_priority)));
+        type = std::make_shared<DataTypeTuple>(DataTypes{real_version_type, source_priority_type});
+    }
+
+    expression = setAlias(std::move(expression), global_replacing_final_info.synthetic_version_column_name);
+
+    return AliasData{
+        .name = global_replacing_final_info.synthetic_version_column_name,
+        .type = std::move(type),
+        .expression = std::move(expression)};
+}
+
+std::optional<ReadFromMerge::GlobalReplacingFinalInfo> ReadFromMerge::tryCreateGlobalReplacingFinalInfo() const
+{
+    if (!query_info.isFinal())
+        return std::nullopt;
+
+    const auto & preferred_table_suffix = assert_cast<const StorageMerge &>(*storage_merge).preferred_source_table_suffix;
+    if (preferred_table_suffix.empty() || selected_tables.size() < 2)
+        return std::nullopt;
+
+    const auto * first_merge_tree = dynamic_cast<const MergeTreeData *>(std::get<1>(*selected_tables.begin()).get());
+    if (!first_merge_tree)
+        throw Exception(ErrorCodes::NOT_IMPLEMENTED,
+            "Cross-table FINAL for Merge requires all selected tables to be local MergeTree-family tables when a preferred source table suffix is configured");
+
+    if (first_merge_tree->merging_params.mode != MergeTreeData::MergingParams::Replacing)
+        throw Exception(ErrorCodes::NOT_IMPLEMENTED,
+            "Cross-table FINAL for Merge currently supports only ReplacingMergeTree children when a preferred source table suffix is configured");
+
+    if (!first_merge_tree->merging_params.is_deleted_column.empty())
+        throw Exception(ErrorCodes::NOT_IMPLEMENTED,
+            "Cross-table FINAL for Merge doesn't support ReplacingMergeTree tables with is_deleted when a preferred source table suffix is configured");
+
+    const auto first_metadata = std::get<1>(*selected_tables.begin())->getInMemoryMetadataPtr();
+    const auto & sorting_key_columns = first_metadata->getSortingKeyColumns();
+    const auto & reverse_flags = first_metadata->getSortingKeyReverseFlags();
+    const auto & real_version_column_name = first_merge_tree->merging_params.version_column;
+
+    Block intermediate_header = *common_header;
+    Names additional_required_column_names;
+
+    for (const auto & sorting_key_column : sorting_key_columns)
+    {
+        const auto & column_description = first_metadata->getColumns().get(sorting_key_column);
+        if (!common_header->has(sorting_key_column))
+            appendUniqueName(additional_required_column_names, sorting_key_column);
+        addHeaderColumnIfMissing(intermediate_header, sorting_key_column, column_description.type);
+    }
+
+    if (!real_version_column_name.empty())
+    {
+        const auto & column_description = first_metadata->getColumns().get(real_version_column_name);
+        if (!common_header->has(real_version_column_name))
+            appendUniqueName(additional_required_column_names, real_version_column_name);
+        addHeaderColumnIfMissing(intermediate_header, real_version_column_name, column_description.type);
+    }
+
+    String synthetic_version_column_name = "__merge_replacing_version";
+    while (intermediate_header.has(synthetic_version_column_name))
+        synthetic_version_column_name += "_";
+
+    auto synthetic_version_type = real_version_column_name.empty()
+        ? static_cast<DataTypePtr>(std::make_shared<DataTypeUInt8>())
+        : static_cast<DataTypePtr>(std::make_shared<DataTypeTuple>(DataTypes{
+            first_metadata->getColumns().get(real_version_column_name).type,
+            std::make_shared<DataTypeUInt8>()}));
+    addHeaderColumnIfMissing(intermediate_header, synthetic_version_column_name, synthetic_version_type);
+
+    SortDescription sort_description;
+    sort_description.reserve(sorting_key_columns.size());
+    for (size_t i = 0; i < sorting_key_columns.size(); ++i)
+        sort_description.emplace_back(sorting_key_columns[i], reverse_flags.empty() || !reverse_flags[i] ? 1 : -1);
+
+    for (const auto & table : selected_tables)
+    {
+        const auto & storage = std::get<1>(table);
+        const auto * merge_tree = dynamic_cast<const MergeTreeData *>(storage.get());
+        if (!merge_tree)
+            throw Exception(ErrorCodes::NOT_IMPLEMENTED,
+                "Cross-table FINAL for Merge requires all selected tables to be local MergeTree-family tables when a preferred source table suffix is configured. Table {} is unsupported",
+                storage->getStorageID().getNameForLogs());
+
+        if (merge_tree->merging_params.mode != MergeTreeData::MergingParams::Replacing)
+            throw Exception(ErrorCodes::NOT_IMPLEMENTED,
+                "Cross-table FINAL for Merge requires all selected tables to use ReplacingMergeTree. Table {} uses {}",
+                storage->getStorageID().getNameForLogs(),
+                merge_tree->merging_params.getModeName());
+
+        if (!merge_tree->merging_params.is_deleted_column.empty())
+            throw Exception(ErrorCodes::NOT_IMPLEMENTED,
+                "Cross-table FINAL for Merge doesn't support ReplacingMergeTree tables with is_deleted. Table {} is unsupported",
+                storage->getStorageID().getNameForLogs());
+
+        if (merge_tree->merging_params.version_column != real_version_column_name)
+            throw Exception(ErrorCodes::NOT_IMPLEMENTED,
+                "Cross-table FINAL for Merge requires all selected ReplacingMergeTree tables to have the same version column. Expected '{}', got '{}' in table {}",
+                real_version_column_name,
+                merge_tree->merging_params.version_column,
+                storage->getStorageID().getNameForLogs());
+
+        const auto metadata = storage->getInMemoryMetadataPtr();
+        if (metadata->getSortingKeyColumns() != sorting_key_columns || metadata->getSortingKeyReverseFlags() != reverse_flags)
+            throw Exception(ErrorCodes::NOT_IMPLEMENTED,
+                "Cross-table FINAL for Merge requires all selected ReplacingMergeTree tables to have the same sorting key. Table {} is incompatible",
+                storage->getStorageID().getNameForLogs());
+
+        for (const auto & sorting_key_column : sorting_key_columns)
+        {
+            if (!metadata->getColumns().get(sorting_key_column).type->equals(*first_metadata->getColumns().get(sorting_key_column).type))
+                throw Exception(ErrorCodes::NOT_IMPLEMENTED,
+                    "Cross-table FINAL for Merge requires matching sorting key column types. Column {} differs in table {}",
+                    sorting_key_column,
+                    storage->getStorageID().getNameForLogs());
+        }
+    }
+
+    return GlobalReplacingFinalInfo{
+        .intermediate_header = std::make_shared<const Block>(std::move(intermediate_header)),
+        .sort_description = std::move(sort_description),
+        .additional_required_column_names = std::move(additional_required_column_names),
+        .synthetic_version_column_name = std::move(synthetic_version_column_name),
+        .preferred_table_suffix = preferred_table_suffix,
+        .real_version_column_name = real_version_column_name};
+}
+
+void ReadFromMerge::addGlobalReplacingFinal(QueryPipelineBuilder & pipeline) const
+{
+    if (!global_replacing_final_info)
+        return;
+
+    pipeline.addTransform(std::make_shared<ReplacingSortedTransform>(
+        pipeline.getSharedHeader(),
+        pipeline.getNumStreams(),
+        global_replacing_final_info->sort_description,
+        String{},
+        global_replacing_final_info->synthetic_version_column_name,
+        required_max_block_size,
+        /*max_block_size_bytes=*/0,
+        /*max_dynamic_subcolumns=*/std::nullopt));
+
+    auto project_to_output = std::make_shared<ExpressionActions>(ActionsDAG::makeConvertingActions(
+        pipeline.getHeader().getColumnsWithTypeAndName(),
+        output_header->getColumnsWithTypeAndName(),
+        ActionsDAG::MatchColumnsMode::Name,
+        context));
+
+    pipeline.addSimpleTransform([project_to_output](const SharedHeader & header)
+    {
+        return std::make_shared<ExpressionTransform>(header, project_to_output);
+    });
+}
+
 void ReadFromMerge::initializePipeline(QueryPipelineBuilder & pipeline, const BuildQueryPipelineSettings &)
 {
     filterTablesAndCreateChildrenPlans();
@@ -581,6 +795,8 @@ void ReadFromMerge::initializePipeline(QueryPipelineBuilder & pipeline, const Bu
 
     pipeline = QueryPipelineBuilder::unitePipelines(std::move(pipelines));
 
+    addGlobalReplacingFinal(pipeline);
+
     // It's possible to have many tables read from merge, resize(num_streams) might open too many files at the same time.
     // Using narrowPipe instead. But in case of reading in order of primary key, we cannot do it,
     // because narrowPipe doesn't preserve order. Also, if we are doing a memory efficient distributed agggregation, bucket
@@ -608,7 +824,23 @@ void ReadFromMerge::filterTablesAndCreateChildrenPlans()
     if (child_plans)
         return;
 
-    selected_tables = getSelectedTables(context);
+    has_database_virtual_column = false;
+    has_table_virtual_column = false;
+    column_names.clear();
+    column_names.reserve(all_column_names.size());
+
+    for (const auto & column_name : all_column_names)
+    {
+        if (column_name == "_database" && storage_merge->isVirtualColumn(column_name, merge_storage_snapshot->metadata))
+            has_database_virtual_column = true;
+        else if (column_name == "_table" && storage_merge->isVirtualColumn(column_name, merge_storage_snapshot->metadata))
+            has_table_virtual_column = true;
+        else
+            column_names.push_back(column_name);
+    }
+
+    selected_tables = getSelectedTables(context, has_database_virtual_column, has_table_virtual_column);
+    global_replacing_final_info = tryCreateGlobalReplacingFinalInfo();
     child_plans = createChildrenPlans(query_info);
 }
 
@@ -693,6 +925,12 @@ std::vector<ReadFromMerge::ChildPlan> ReadFromMerge::createChildrenPlans(SelectQ
 
             Names column_names_as_aliases;
             Names real_column_names = all_column_names;
+
+            if (global_replacing_final_info)
+            {
+                for (const auto & additional_required_column_name : global_replacing_final_info->additional_required_column_names)
+                    appendUniqueName(real_column_names, additional_required_column_name);
+            }
 
             /// If there are no real columns requested from this table, we will read the smallest column.
             /// We should remember it to not include this column in the result.
@@ -789,9 +1027,14 @@ std::vector<ReadFromMerge::ChildPlan> ReadFromMerge::createChildrenPlans(SelectQ
 
             if (child.plan.isInitialized())
             {
+                addVirtualColumns(child, modified_query_info, common_processed_stage, table);
+
+                if (global_replacing_final_info)
+                    aliases.push_back(buildGlobalReplacingVersionAlias(*global_replacing_final_info, storage_metadata_snapshot, table_name));
                 /// Source tables could have different but convertible types, like numeric types of different width.
                 /// We must return streams with structure equals to structure of Merge table.
-                convertAndFilterSourceStream(*common_header, modified_query_info, nested_storage_snapshot, aliases, row_policy_data_opt, context, child, is_smallest_column_requested);
+                const auto & target_header = global_replacing_final_info ? *global_replacing_final_info->intermediate_header : *common_header;
+                convertAndFilterSourceStream(target_header, modified_query_info, nested_storage_snapshot, aliases, row_policy_data_opt, context, child, is_smallest_column_requested);
 
                 for (const auto & filter_info : pushed_down_filters)
                 {
@@ -1089,6 +1332,83 @@ bool recursivelyApplyToReadingSteps(QueryPlan::Node * node, const std::function<
         ok &= func(*read_from_merge_tree);
 
     return ok;
+}
+
+void ReadFromMerge::addVirtualColumns(
+    ChildPlan & child,
+    SelectQueryInfo & modified_query_info,
+    QueryProcessingStage::Enum processed_stage,
+    const StorageWithLockAndName & storage_with_lock) const
+{
+    const auto & [database_name, _, storage, table_name] = storage_with_lock;
+
+    /// Add virtual columns if we don't already have them.
+
+    auto plan_header = child.plan.getCurrentHeader();
+
+    if (context->getSettingsRef()[Setting::allow_experimental_analyzer])
+    {
+        String table_alias = modified_query_info.query_tree->as<QueryNode>()->getJoinTree()->as<TableNode>()->getAlias();
+
+        String database_column = table_alias.empty() || processed_stage == QueryProcessingStage::FetchColumns ? "_database" : table_alias + "._database";
+        String table_column = table_alias.empty() || processed_stage == QueryProcessingStage::FetchColumns ? "_table" : table_alias + "._table";
+
+        if (has_database_virtual_column && common_header->has(database_column)
+            && child.stage == QueryProcessingStage::FetchColumns && !plan_header->has(database_column))
+        {
+            ColumnWithTypeAndName column;
+            column.name = database_column;
+            column.type = std::make_shared<DataTypeLowCardinality>(std::make_shared<DataTypeString>());
+            column.column = column.type->createColumnConst(0, Field(database_name));
+
+            auto adding_column_dag = ActionsDAG::makeAddingColumnActions(std::move(column));
+            auto expression_step = std::make_unique<ExpressionStep>(child.plan.getCurrentHeader(), std::move(adding_column_dag));
+            child.plan.addStep(std::move(expression_step));
+            plan_header = child.plan.getCurrentHeader();
+        }
+
+        if (has_table_virtual_column && common_header->has(table_column)
+            && processed_stage == QueryProcessingStage::FetchColumns && !plan_header->has(table_column))
+        {
+            ColumnWithTypeAndName column;
+            column.name = table_column;
+            column.type = std::make_shared<DataTypeLowCardinality>(std::make_shared<DataTypeString>());
+            column.column = column.type->createColumnConst(0, Field(table_name));
+
+            auto adding_column_dag = ActionsDAG::makeAddingColumnActions(std::move(column));
+            auto expression_step = std::make_unique<ExpressionStep>(child.plan.getCurrentHeader(), std::move(adding_column_dag));
+            child.plan.addStep(std::move(expression_step));
+            plan_header = child.plan.getCurrentHeader();
+        }
+    }
+    else
+    {
+        if (has_database_virtual_column && common_header->has("_database") && !plan_header->has("_database"))
+        {
+            ColumnWithTypeAndName column;
+            column.name = "_database";
+            column.type = std::make_shared<DataTypeLowCardinality>(std::make_shared<DataTypeString>());
+            column.column = column.type->createColumnConst(0, Field(database_name));
+
+            auto adding_column_dag = ActionsDAG::makeAddingColumnActions(std::move(column));
+            auto expression_step = std::make_unique<ExpressionStep>(child.plan.getCurrentHeader(), std::move(adding_column_dag));
+            child.plan.addStep(std::move(expression_step));
+            plan_header = child.plan.getCurrentHeader();
+        }
+
+        if (has_table_virtual_column && common_header->has("_table") && !plan_header->has("_table"))
+        {
+            ColumnWithTypeAndName column;
+            column.name = "_table";
+            column.type = std::make_shared<DataTypeLowCardinality>(std::make_shared<DataTypeString>());
+            column.column = column.type->createColumnConst(0, Field(table_name));
+
+            auto adding_column_dag = ActionsDAG::makeAddingColumnActions(std::move(column));
+            auto expression_step = std::make_unique<ExpressionStep>(child.plan.getCurrentHeader(), std::move(adding_column_dag));
+            child.plan.addStep(std::move(expression_step));
+            plan_header = child.plan.getCurrentHeader();
+        }
+    }
 }
 
 QueryPipelineBuilderPtr ReadFromMerge::buildPipeline(
@@ -1711,10 +2031,10 @@ void registerStorageMerge(StorageFactory & factory)
 
         ASTs & engine_args = args.engine_args;
 
-        if (engine_args.size() != 2)
+        if (engine_args.size() != 2 && engine_args.size() != 3)
             throw Exception(ErrorCodes::NUMBER_OF_ARGUMENTS_DOESNT_MATCH,
-                            "Storage Merge requires exactly 2 parameters - name "
-                            "of source database and regexp for table names.");
+                            "Storage Merge requires 2 or 3 parameters - name of source database, regexp for table names, "
+                            "and optionally the preferred source table suffix for cross-table ReplacingMergeTree FINAL.");
 
         auto [is_regexp, database_ast] = StorageMerge::evaluateDatabaseName(engine_args[0], args.getLocalContext());
 
@@ -1726,8 +2046,15 @@ void registerStorageMerge(StorageFactory & factory)
         engine_args[1] = evaluateConstantExpressionAsLiteral(engine_args[1], args.getLocalContext());
         String table_name_regexp = checkAndGetLiteralArgument<String>(engine_args[1], "table_name_regexp");
 
+        String preferred_source_table_suffix;
+        if (engine_args.size() == 3)
+        {
+            engine_args[2] = evaluateConstantExpressionAsLiteral(engine_args[2], args.getLocalContext());
+            preferred_source_table_suffix = checkAndGetLiteralArgument<String>(engine_args[2], "preferred_source_table_suffix");
+        }
+
         return std::make_shared<StorageMerge>(
-            args.table_id, args.columns, args.comment, source_database_name_or_regexp, is_regexp, table_name_regexp, args.getLocalContext());
+            args.table_id, args.columns, args.comment, source_database_name_or_regexp, is_regexp, table_name_regexp, preferred_source_table_suffix, args.getLocalContext());
     },
     {
         .supports_schema_inference = true

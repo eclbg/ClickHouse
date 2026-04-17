@@ -225,3 +225,5 @@ FINAL
 ```
 
 For further details on `FINAL`, including how to optimize `FINAL` performance, we recommend reading our [detailed guide on ReplacingMergeTree](/guides/replacing-merge-tree).
+
+When compatible `ReplacingMergeTree` tables are queried through the `Merge` table engine or the `merge()` table function, you can opt into a global cross-table `FINAL` merge by passing a preferred source table suffix as the optional third argument. If several surviving rows have the same sorting key and the same real version, rows from tables whose names end with the configured suffix win the cross-table tie-break.

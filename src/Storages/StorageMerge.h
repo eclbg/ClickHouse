@@ -30,6 +30,7 @@ public:
         const String & source_database_name_or_regexp_,
         bool database_is_regexp_,
         const DBToTableSetMap & source_databases_and_tables_,
+        const String & preferred_source_table_suffix_,
         ContextPtr context_);
 
     StorageMerge(
@@ -39,6 +40,7 @@ public:
         const String & source_database_name_or_regexp_,
         bool database_is_regexp_,
         const String & source_table_regexp_,
+        const String & preferred_source_table_suffix_,
         ContextPtr context_);
 
     std::string getName() const override { return "Merge"; }
@@ -121,6 +123,7 @@ private:
     };
 
     DatabaseNameOrRegexp database_name_or_regexp;
+    String preferred_source_table_suffix;
 
     template <typename F>
     StoragePtr traverseTablesUntil(F && predicate) const;
@@ -196,6 +199,9 @@ private:
 
     StorageListWithLocks selected_tables;
     Names all_column_names;
+    Names column_names;
+    bool has_database_virtual_column = false;
+    bool has_table_virtual_column = false;
     StoragePtr storage_merge;
     StorageSnapshotPtr merge_storage_snapshot;
 
@@ -258,16 +264,37 @@ private:
         QueryProcessingStage::Enum stage;
     };
 
+    struct GlobalReplacingFinalInfo
+    {
+        SharedHeader intermediate_header;
+        SortDescription sort_description;
+        Names additional_required_column_names;
+        String synthetic_version_column_name;
+        String preferred_table_suffix;
+        String real_version_column_name;
+    };
+
     /// Store read plan for each child table.
     /// It's needed to guarantee lifetime for child steps to be the same as for this step (mainly for EXPLAIN PIPELINE).
     std::optional<std::vector<ChildPlan>> child_plans;
+
+    std::optional<GlobalReplacingFinalInfo> global_replacing_final_info;
 
     /// Store filters pushed down from query plan optimization. Filters are added on top of child plans.
     std::vector<FilterDAGInfo> pushed_down_filters;
 
     std::vector<ChildPlan> createChildrenPlans(SelectQueryInfo & query_info_) const;
 
+    static AliasData buildGlobalReplacingVersionAlias(
+        const GlobalReplacingFinalInfo & global_replacing_final_info,
+        const StorageMetadataPtr & metadata,
+        const String & table_name);
+
+    std::optional<GlobalReplacingFinalInfo> tryCreateGlobalReplacingFinalInfo() const;
+
     void filterTablesAndCreateChildrenPlans();
+
+    void addGlobalReplacingFinal(QueryPipelineBuilder & pipeline) const;
 
     ChildPlan createPlanForTable(
         const StorageSnapshotPtr & storage_snapshot,
@@ -280,6 +307,12 @@ private:
         const RowPolicyDataOpt & row_policy_data_opt,
         ContextMutablePtr modified_context,
         size_t streams_num) const;
+
+    void addVirtualColumns(
+        ChildPlan & child,
+        SelectQueryInfo & modified_query_info,
+        QueryProcessingStage::Enum processed_stage,
+        const StorageWithLockAndName & storage_with_lock) const;
 
     QueryPipelineBuilderPtr buildPipeline(
         ChildPlan & child,
@@ -296,7 +329,9 @@ private:
         bool is_smallest_column_requested);
 
     StorageMerge::StorageListWithLocks getSelectedTables(
-        ContextPtr query_context) const;
+        ContextPtr query_context,
+        bool filter_by_database_virtual_column,
+        bool filter_by_table_virtual_column) const;
 };
 
 }

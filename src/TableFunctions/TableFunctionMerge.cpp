@@ -43,7 +43,7 @@ namespace
         source_table_regexp);
 }
 
-/* merge (db_name, tables_regexp) - creates a temporary StorageMerge.
+/* merge (db_name, tables_regexp[, preferred_source_table_suffix]) - creates a temporary StorageMerge.
  * The structure of the table is taken from the first table that came up, suitable for regexp.
  * If there is no such table, an exception is thrown.
  */
@@ -63,6 +63,7 @@ private:
 
     String source_database_name_or_regexp;
     String source_table_regexp;
+    String preferred_source_table_suffix;
     bool database_is_regexp = false;
 };
 
@@ -90,8 +91,8 @@ void TableFunctionMerge::parseArguments(const ASTPtr & ast_function, ContextPtr 
 
     if (args_func.size() != 1)
         throw Exception(ErrorCodes::NUMBER_OF_ARGUMENTS_DOESNT_MATCH,
-                        "Table function 'merge' requires from 1 to 2 parameters: "
-                        "merge(['db_name',] 'tables_regexp')");
+                        "Table function 'merge' requires 1, 2, or 3 parameters: "
+                        "merge('tables_regexp') or merge('db_name', 'tables_regexp'[, 'preferred_source_table_suffix'])");
 
     ASTs & args = args_func.at(0)->children;
 
@@ -103,7 +104,7 @@ void TableFunctionMerge::parseArguments(const ASTPtr & ast_function, ContextPtr 
         args[0] = evaluateConstantExpressionAsLiteral(args[0], context);
         source_table_regexp = checkAndGetLiteralArgument<String>(args[0], "table_name_regexp");
     }
-    else if (args.size() == 2)
+    else if (args.size() == 2 || args.size() == 3)
     {
         auto [is_regexp, database_ast] = StorageMerge::evaluateDatabaseName(args[0], context);
 
@@ -115,12 +116,18 @@ void TableFunctionMerge::parseArguments(const ASTPtr & ast_function, ContextPtr 
 
         args[1] = evaluateConstantExpressionAsLiteral(args[1], context);
         source_table_regexp = checkAndGetLiteralArgument<String>(args[1], "table_name_regexp");
+
+        if (args.size() == 3)
+        {
+            args[2] = evaluateConstantExpressionAsLiteral(args[2], context);
+            preferred_source_table_suffix = checkAndGetLiteralArgument<String>(args[2], "preferred_source_table_suffix");
+        }
     }
     else
     {
         throw Exception(ErrorCodes::NUMBER_OF_ARGUMENTS_DOESNT_MATCH,
-                        "Table function 'merge' requires from 1 to 2 parameters: "
-                        "merge(['db_name',] 'tables_regexp')");
+                        "Table function 'merge' requires 1, 2, or 3 parameters: "
+                        "merge('tables_regexp') or merge('db_name', 'tables_regexp'[, 'preferred_source_table_suffix'])");
     }
 }
 
@@ -148,6 +155,7 @@ StoragePtr TableFunctionMerge::executeImpl(const ASTPtr & /*ast_function*/, Cont
         source_database_name_or_regexp,
         database_is_regexp,
         source_table_regexp,
+        preferred_source_table_suffix,
         context);
 
     res->startup();
@@ -161,7 +169,7 @@ void registerTableFunctionMerge(TableFunctionFactory & factory)
     factory.registerFunction<TableFunctionMerge>(
         {
             .description = "Creates a temporary Merge table. The structure will be derived from underlying tables by using a union of their columns and by deriving common types.",
-            .examples = {{"merge", "SELECT * FROM merge(db, '^table_.*')", ""}},
+            .examples = {{"merge", "SELECT * FROM merge(db, '^table_.*', '_rt') FINAL", ""}},
             .category = FunctionDocumentation::Category::TableFunction
         },
         {.allow_readonly = true}
