@@ -1,0 +1,55 @@
+EXPLAIN for id = id (should show constant true):
+QUERY id: 0
+  PROJECTION COLUMNS
+    id UInt32
+    nullable_id Nullable(UInt32)
+  PROJECTION
+    LIST id: 1, nodes: 2
+      COLUMN id: 2, column_name: id, result_type: UInt32, source_id: 3
+      COLUMN id: 4, column_name: nullable_id, result_type: Nullable(UInt32), source_id: 3
+  JOIN TREE
+    TABLE id: 3, alias: __table1, table_name: default.test_table_semantic_opt_explain
+  WHERE
+    CONSTANT id: 5, constant_value: UInt64_1, constant_value_type: UInt8
+EXPLAIN for id != id (should show constant false):
+QUERY id: 0
+  PROJECTION COLUMNS
+    id UInt32
+    nullable_id Nullable(UInt32)
+  PROJECTION
+    LIST id: 1, nodes: 2
+      COLUMN id: 2, column_name: id, result_type: UInt32, source_id: 3
+      COLUMN id: 4, column_name: nullable_id, result_type: Nullable(UInt32), source_id: 3
+  JOIN TREE
+    TABLE id: 3, alias: __table1, table_name: default.test_table_semantic_opt_explain
+  WHERE
+    CONSTANT id: 5, constant_value: UInt64_0, constant_value_type: UInt8
+EXPLAIN for nullable_id = nullable_id (should show isNotNull function):
+QUERY id: 0
+  PROJECTION COLUMNS
+    id UInt32
+    nullable_id Nullable(UInt32)
+  PROJECTION
+    LIST id: 1, nodes: 2
+      COLUMN id: 2, column_name: id, result_type: UInt32, source_id: 3
+      COLUMN id: 4, column_name: nullable_id, result_type: Nullable(UInt32), source_id: 3
+  JOIN TREE
+    TABLE id: 3, alias: __table1, table_name: default.test_table_semantic_opt_explain
+  WHERE
+    FUNCTION id: 5, function_name: isNotNull, function_type: ordinary, result_type: UInt8
+      ARGUMENTS
+        LIST id: 6, nodes: 1
+          COLUMN id: 7, column_name: nullable_id, result_type: Nullable(UInt32), source_id: 3
+EXPLAIN for nullable_id != nullable_id (should show false):
+QUERY id: 0
+  PROJECTION COLUMNS
+    id UInt32
+    nullable_id Nullable(UInt32)
+  PROJECTION
+    LIST id: 1, nodes: 2
+      COLUMN id: 2, column_name: id, result_type: UInt32, source_id: 3
+      COLUMN id: 4, column_name: nullable_id, result_type: Nullable(UInt32), source_id: 3
+  JOIN TREE
+    TABLE id: 3, alias: __table1, table_name: default.test_table_semantic_opt_explain
+  WHERE
+    CONSTANT id: 5, constant_value: UInt64_0, constant_value_type: UInt8

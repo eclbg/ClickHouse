@@ -51,6 +51,7 @@
 #include <Analyzer/Passes/RemoveUnusedProjectionColumnsPass.h>
 #include <Analyzer/Passes/RewriteAggregateFunctionWithIfPass.h>
 #include <Analyzer/Passes/RewriteSumFunctionWithSumAndCountPass.h>
+#include <Analyzer/Passes/SemanticComparisonOptimizationPass.h>
 #include <Analyzer/Passes/ShardNumColumnToFunctionPass.h>
 #include <Analyzer/Passes/SumIfToCountIfPass.h>
 #include <Analyzer/Passes/TruncateOrderByAfterGroupByKeysPass.h>
@@ -175,8 +176,6 @@ private:
 }
 
 /** ClickHouse query tree pass manager.
-  *
-  * TODO: Add optimizations based on function semantics. Example: SELECT * FROM test_table WHERE id != id. (id is not nullable column).
   */
 
 QueryTreePassManager::QueryTreePassManager(ContextPtr context_) : WithContext(context_) {}
@@ -330,6 +329,8 @@ void addQueryTreePasses(QueryTreePassManager & manager, bool only_analyze)
 
     manager.addPass(std::make_unique<LikePerfectAffixRewritePass>());
     manager.addPass(std::make_unique<LogicalExpressionOptimizerPass>());
+
+    manager.addPass(std::make_unique<SemanticComparisonOptimizationPass>());
 
     manager.addPass(std::make_unique<CrossToInnerJoinPass>());
     manager.addPass(std::make_unique<ShardNumColumnToFunctionPass>());
