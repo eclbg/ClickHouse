@@ -715,6 +715,23 @@ static StoragePtr create(const StorageFactory::Arguments & args)
 
         storage_settings->loadFromQuery(*args.storage_def, context, LoadingStrictnessLevel::ATTACH <= args.mode);
 
+        if (const auto * shared_deduplication_namespace = args.storage_def->settings->changes.tryGet("shared_deduplication_namespace"))
+        {
+            const auto & namespace_value = shared_deduplication_namespace->safeGet<String>();
+            if (namespace_value.empty())
+            {
+                throw Exception(ErrorCodes::BAD_ARGUMENTS, "MergeTree setting `shared_deduplication_namespace` cannot be empty");
+            }
+
+            if (!replicated)
+            {
+                throw Exception(
+                    ErrorCodes::BAD_ARGUMENTS,
+                    "MergeTree setting `shared_deduplication_namespace` is supported only for ReplicatedMergeTree-family tables, got {}",
+                    args.engine_name);
+            }
+        }
+
         /// Updates the default storage_settings with settings specified via SETTINGS arg in a query
         if (args.storage_def->settings)
         {

@@ -226,6 +226,7 @@ namespace MergeTreeSetting
     extern const MergeTreeSettingsBool replicated_can_become_leader;
     extern const MergeTreeSettingsUInt64 replicated_deduplication_window;
     extern const MergeTreeSettingsUInt64 replicated_deduplication_window_for_async_inserts;
+    extern const MergeTreeSettingsString shared_deduplication_namespace;
     extern const MergeTreeSettingsFloat replicated_max_ratio_of_wrong_parts;
     extern const MergeTreeSettingsBool use_minimalistic_checksums_in_zookeeper;
     extern const MergeTreeSettingsBool use_minimalistic_part_header_in_zookeeper;
@@ -7402,6 +7403,15 @@ EphemeralLockInZooKeeper StorageReplicatedMergeTree::allocateBlockNumber(
     return lock;
 }
 
+String StorageReplicatedMergeTree::getDeduplicationNamespacePath() const
+{
+    const auto & shared_deduplication_namespace = (*getSettings())[MergeTreeSetting::shared_deduplication_namespace];
+    if (!shared_deduplication_namespace.value.empty())
+        return shared_deduplication_namespace.value;
+
+    return zookeeper_path;
+}
+
 Strings StorageReplicatedMergeTree::tryWaitForAllReplicasToProcessLogEntry(
     const String & table_zookeeper_path, const ReplicatedMergeTreeLogEntryData & entry,
     Int64 wait_for_inactive_timeout, WatchEventByPath & watch_events)
@@ -9183,6 +9193,9 @@ void StorageReplicatedMergeTree::movePartitionToTable(const StoragePtr & dest_ta
 
     auto dest_metadata_snapshot = dest_table->getInMemoryMetadataPtr(query_context, false);
     auto metadata_snapshot = getInMemoryMetadataPtr(query_context, false);
+    const String deduplication_namespace_path = getDeduplicationNamespacePath();
+    const String dest_deduplication_namespace_path = dest_table_storage->getDeduplicationNamespacePath();
+    const bool shares_deduplication_namespace = deduplication_namespace_path == dest_deduplication_namespace_path;
 
     Stopwatch watch;
     ProfileEventsScope profile_events_scope;
@@ -9345,7 +9358,20 @@ void StorageReplicatedMergeTree::movePartitionToTable(const StoragePtr & dest_ta
         /// Cancel concurrent inserts in range
         clearLockedBlockNumbersInPartition(*zookeeper, drop_range.getPartitionId(), drop_range.min_block, drop_range.max_block);
 
-        clearBlocksInPartition(*zookeeper, drop_range.getPartitionId(), drop_range.min_block, drop_range.max_block);
+        if (!shares_deduplication_namespace)
+        {
+            clearBlocksInPartition(*zookeeper, drop_range.getPartitionId(), drop_range.min_block, drop_range.max_block);
+        }
+        else
+        {
+            LOG_DEBUG(
+                log,
+                "Keeping deduplication block IDs for moved partition {} because tables {} and {} share Keeper deduplication namespace {}",
+                partition_id,
+                getStorageID().getNameForLogs(),
+                dest_table_storage->getStorageID().getNameForLogs(),
+                deduplication_namespace_path);
+        }
 
         Coordination::Responses op_results;
 

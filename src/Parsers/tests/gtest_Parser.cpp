@@ -269,6 +269,29 @@ INSTANTIATE_TEST_SUITE_P(ParserCreateDatabaseQuery, ParserTest,
         }
 })));
 
+INSTANTIATE_TEST_SUITE_P(ParserCreateQuery_SHARED_DEDUPLICATION_NAMESPACE, ParserTest,
+    ::testing::Combine(
+        ::testing::Values(std::make_shared<ParserCreateQuery>()),
+        ::testing::ValuesIn(std::initializer_list<ParserTestCase>{
+        {
+            R"sql(CREATE TABLE test_shared_dedup
+(
+    id UInt64
+)
+ENGINE = ReplicatedMergeTree('/clickhouse/tables/{database}/test_shared_dedup', '{replica}')
+ORDER BY id
+SETTINGS shared_deduplication_namespace = 'namespace-1';
+)sql",
+            R"sql(CREATE TABLE test_shared_dedup
+(
+    `id` UInt64
+)
+ENGINE = ReplicatedMergeTree('/clickhouse/tables/{database}/test_shared_dedup', '{replica}')
+ORDER BY id
+SETTINGS shared_deduplication_namespace = 'namespace-1')sql"
+        }
+})));
+
 INSTANTIATE_TEST_SUITE_P(ParserCreateUserQuery, ParserTest,
     ::testing::Combine(
         ::testing::Values(std::make_shared<ParserCreateUserQuery>()),

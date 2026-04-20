@@ -342,6 +342,7 @@ public:
     const String & getZooKeeperName() const { return zookeeper_info.zookeeper_name; }
     const String & getZooKeeperPath() const { return zookeeper_info.path; }
     const String & getFullZooKeeperPath() const { return zookeeper_info.full_path; }
+    String getDeduplicationNamespacePath() const;
 
     // Return table id, common for different replicas
     String getTableSharedID() const override;

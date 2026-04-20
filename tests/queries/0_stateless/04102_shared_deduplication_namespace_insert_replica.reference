@@ -1,0 +1,9 @@
+create owner and seed dedup history
+1	1001
+create follower with shared dedup namespace
+0
+The part was deduplicated
+same data without token is also deduplicated through shared namespace
+0
+same token without shared namespace is still inserted
+1	1001

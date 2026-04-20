@@ -1172,6 +1172,11 @@ namespace ErrorCodes
     The time is relative to the time of the most recent record, not to the wall
     time. If it's the only record it will be stored forever.
     )", 0) \
+    DECLARE(String, shared_deduplication_namespace, "", R"(
+    Persistent metadata namespace for shared replicated deduplication.
+    Only supported for ReplicatedMergeTree-family tables.
+    For sync replicated inserts, deduplication block ids are read and written under this Keeper path.
+    )", 0) \
     DECLARE(Milliseconds, async_block_ids_cache_update_wait_ms, 100, R"(
     How long each insert iteration will wait for async_block_ids_cache update
     )", 0) \
@@ -2789,6 +2794,7 @@ bool MergeTreeSettings::isReadonlySetting(const String & name)
         || name == "add_minmax_index_for_numeric_columns"
         || name == "add_minmax_index_for_string_columns"
         || name == "add_minmax_index_for_temporal_columns"
+        || name == "shared_deduplication_namespace"
         || name == "table_disk"
     ;
 }
