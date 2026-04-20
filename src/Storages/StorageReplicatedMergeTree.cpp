@@ -226,6 +226,7 @@ namespace MergeTreeSetting
     extern const MergeTreeSettingsBool replicated_can_become_leader;
     extern const MergeTreeSettingsUInt64 replicated_deduplication_window;
     extern const MergeTreeSettingsUInt64 replicated_deduplication_window_for_async_inserts;
+    extern const MergeTreeSettingsString shared_deduplication_namespace;
     extern const MergeTreeSettingsFloat replicated_max_ratio_of_wrong_parts;
     extern const MergeTreeSettingsBool use_minimalistic_checksums_in_zookeeper;
     extern const MergeTreeSettingsBool use_minimalistic_part_header_in_zookeeper;
@@ -7400,6 +7401,15 @@ EphemeralLockInZooKeeper StorageReplicatedMergeTree::allocateBlockNumber(
         LOG_TRACE(log, "Allocated block number {} in partition {}", lock.getNumber(), partition_id);
 
     return lock;
+}
+
+String StorageReplicatedMergeTree::getDeduplicationNamespacePath() const
+{
+    const auto & shared_deduplication_namespace = (*getSettings())[MergeTreeSetting::shared_deduplication_namespace];
+    if (!shared_deduplication_namespace.value.empty())
+        return shared_deduplication_namespace.value;
+
+    return zookeeper_path;
 }
 
 Strings StorageReplicatedMergeTree::tryWaitForAllReplicasToProcessLogEntry(

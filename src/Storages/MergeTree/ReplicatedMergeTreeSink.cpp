@@ -715,6 +715,7 @@ std::vector<DeduplicationHash> ReplicatedMergeTreeSink::commitPart(
          settings[Setting::insert_keeper_retry_initial_backoff_ms],
          settings[Setting::insert_keeper_retry_max_backoff_ms],
          context->getProcessListElement()});
+    const String deduplication_namespace_path = storage.getDeduplicationNamespacePath();
 
     auto resolve_duplicate_stage = [&] () -> CommitRetryContext::Stages
     {
@@ -722,7 +723,7 @@ std::vector<DeduplicationHash> ReplicatedMergeTreeSink::commitPart(
 
         /// This block was already written to some replica. Get the part name for it.
         /// Note: race condition with DROP PARTITION operation is possible. User will get "No node" exception and it is Ok.
-        auto response = zookeeper->tryGet(getDeduplicationPaths(storage.zookeeper_path, retry_context.conflict_deduplication_hashes));
+        auto response = zookeeper->tryGet(getDeduplicationPaths(deduplication_namespace_path, retry_context.conflict_deduplication_hashes));
         for (size_t i = 0; i < retry_context.conflict_deduplication_hashes.size(); ++i)
         {
             auto & deduplication_hash = retry_context.conflict_deduplication_hashes[i];
@@ -875,7 +876,7 @@ std::vector<DeduplicationHash> ReplicatedMergeTreeSink::commitPart(
 
         /// Allocate new block number and check for duplicates
         auto block_data = serializeCommittingBlockOpToString(CommittingBlock::Op::NewPart);
-        auto block_id_pathes = getDeduplicationPaths(storage.zookeeper_path, deduplication_hashes);
+        auto block_id_pathes = getDeduplicationPaths(deduplication_namespace_path, deduplication_hashes);
         auto block_number_lock = storage.allocateBlockNumber(part->info.getPartitionId(), zookeeper, block_id_pathes, "", block_data); /// 1 RTT
 
         ThreadFuzzer::maybeInjectSleep();

@@ -1175,7 +1175,7 @@ namespace ErrorCodes
     DECLARE(String, shared_deduplication_namespace, "", R"(
     Persistent metadata namespace for shared replicated deduplication.
     Only supported for ReplicatedMergeTree-family tables.
-    This setting does not change insert deduplication behavior by itself.
+    For sync replicated inserts, deduplication block ids are read and written under this Keeper path.
     )", 0) \
     DECLARE(Milliseconds, async_block_ids_cache_update_wait_ms, 100, R"(
     How long each insert iteration will wait for async_block_ids_cache update
