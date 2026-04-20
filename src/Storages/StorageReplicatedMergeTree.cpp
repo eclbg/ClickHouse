@@ -9193,6 +9193,9 @@ void StorageReplicatedMergeTree::movePartitionToTable(const StoragePtr & dest_ta
 
     auto dest_metadata_snapshot = dest_table->getInMemoryMetadataPtr(query_context, false);
     auto metadata_snapshot = getInMemoryMetadataPtr(query_context, false);
+    const String deduplication_namespace_path = getDeduplicationNamespacePath();
+    const String dest_deduplication_namespace_path = dest_table_storage->getDeduplicationNamespacePath();
+    const bool shares_deduplication_namespace = deduplication_namespace_path == dest_deduplication_namespace_path;
 
     Stopwatch watch;
     ProfileEventsScope profile_events_scope;
@@ -9355,7 +9358,20 @@ void StorageReplicatedMergeTree::movePartitionToTable(const StoragePtr & dest_ta
         /// Cancel concurrent inserts in range
         clearLockedBlockNumbersInPartition(*zookeeper, drop_range.getPartitionId(), drop_range.min_block, drop_range.max_block);
 
-        clearBlocksInPartition(*zookeeper, drop_range.getPartitionId(), drop_range.min_block, drop_range.max_block);
+        if (!shares_deduplication_namespace)
+        {
+            clearBlocksInPartition(*zookeeper, drop_range.getPartitionId(), drop_range.min_block, drop_range.max_block);
+        }
+        else
+        {
+            LOG_DEBUG(
+                log,
+                "Keeping deduplication block IDs for moved partition {} because tables {} and {} share Keeper deduplication namespace {}",
+                partition_id,
+                getStorageID().getNameForLogs(),
+                dest_table_storage->getStorageID().getNameForLogs(),
+                deduplication_namespace_path);
+        }
 
         Coordination::Responses op_results;
 
